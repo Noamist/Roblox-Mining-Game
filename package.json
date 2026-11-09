@@ -1,0 +1,11 @@
+{
+  "name": "roblox-mining-game",
+  "version": "1.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "deploy": "node tools/deploy.js",
+    "deploy:verify": "node tools/deploy.js --verify-only",
+    "deploy:help": "node tools/deploy.js --help"
+  }
+}

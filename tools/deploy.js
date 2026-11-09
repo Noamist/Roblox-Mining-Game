@@ -2,6 +2,7 @@
 // Source injection via execute_luau is idempotent: it replaces Source instead of
 // appending to it, so repeated deploys always produce exactly one copy.
 // Usage: node tools/deploy.js [--verify-only]
+// Optional: set env.STUDIO_ID to pin a specific Studio instance.
 
 const fs = require("fs");
 const path = require("path");
@@ -10,7 +11,23 @@ const { spawn } = require("child_process");
 const ROOT = path.resolve(__dirname, "..");
 // studio id is resolved from whatever Studio is connected (override with STUDIO_ID)
 let STUDIO_ID = process.env.STUDIO_ID || "";
-const MCP_BAT = "C:\\Users\\ruhtr\\AppData\\Local\\Roblox\\mcp.bat";
+
+function mcpBatPath() {
+  // Prefer an explicit MCP_BAT path if set, otherwise fall back to the local user's
+  // standard Roblox mcp.bat location.
+  const explicit = process.env.MCP_BAT;
+  if (explicit && fs.existsSync(explicit)) return explicit;
+
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData) {
+    const candidate = path.join(localAppData, "Roblox", "mcp.bat");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  return path.join(process.env.LOCALAPPDATA || "C:\\Users\\sebas\\AppData\\Local", "Roblox", "mcp.bat");
+}
+
+const MCP_BAT = mcpBatPath();
 
 // parent: service name, or "StarterPlayer.StarterPlayerScripts"
 const targets = [
@@ -32,10 +49,25 @@ const targets = [
   { file: "game/src/ServerScriptService/MiningService.luau", parent: "ServerScriptService", name: "MiningService", className: "ModuleScript" },
   { file: "game/src/ServerScriptService/TradeService.luau", parent: "ServerScriptService", name: "TradeService", className: "ModuleScript" },
   { file: "game/src/ServerScriptService/GameServer.server.luau", parent: "ServerScriptService", name: "GameServer", className: "Script" },
+  { file: "game/src/ServerScriptService/HelloWorldScript.luau", parent: "ServerScriptService", name: "HelloWorldScript", className: "Script" },
   { file: "game/src/StarterPlayerScripts/ClientMain.client.luau", parent: "StarterPlayer.StarterPlayerScripts", name: "ClientMain", className: "LocalScript" },
 ];
 
-const verifyOnly = process.argv.includes("--verify-only");
+const deployArgs = process.argv.slice(2);
+const verifyOnly = deployArgs.includes("--verify-only");
+const showHelp = deployArgs.includes("--help");
+const help =
+  "Usage: node tools/deploy.js [--verify-only] [--help]\n\n" +
+  "Pushes the Luau sources under game/src/ into the running Roblox Studio session\n" +
+  "that is connected to this machine's Studio MCP bridge.\n\n" +
+  "Options:\n" +
+  "  --verify-only   Read sources and verify them in Studio without pushing anything new.\n" +
+  "  --help          Print this message and exit.\n\n" +
+  "Environment:\n" +
+  "  STUDIO_ID       Optional. If set, pins the target Studio instance instead of picking\n" +
+  "                 whichever Studio is connected first.\n" +
+  "  MCP_BAT         Optional. Overrides the path to the local Studio MCP bridge batch\n" +
+  "                 file. Default: %LOCALAPPDATA%\\Roblox\\mcp.bat.";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function textOf(msg) {
@@ -112,6 +144,12 @@ async function main() {
 
   const tool = (name, args) => rpc("tools/call", { name, arguments: args });
 
+  if (showHelp) {
+    console.log(help);
+    child.kill();
+    process.exit(0);
+  }
+
   await rpc("initialize", {
     protocolVersion: "2024-11-01",
     capabilities: { tools: { listChanged: true } },
@@ -136,23 +174,32 @@ async function main() {
     child.kill();
     process.exit(1);
   }
-  STUDIO_ID = STUDIO_ID || studios[0].id || studios[0].studioId || studios[0].name;
-  console.log("studio:", STUDIO_ID, "of", JSON.stringify(studios));
+  STUDIO_ID = STUDIO_ID || (() => {
+    const first = studios[0];
+    return first.id || first.studioId || first.name || first;
+  })();
+  console.log("studio:", STUDIO_ID, "of", JSON.stringify(studios.map((s) => (typeof s === "string" ? s : s.id || s.studioId || s.name || s))));
 
   let failures = 0;
 
   if (!verifyOnly) {
     for (const target of targets) {
-      const content = fs.readFileSync(path.join(ROOT, target.file), "utf8").replace(/\r\n/g, "\n").replace(/\n$/, "");
+      const filePath = path.join(ROOT, target.file);
+      if (!fs.existsSync(filePath)) {
+        console.error("MISSING " + target.file);
+        failures++;
+        continue;
+      }
+      const content = fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n").replace(/\n$/, "");
       const res = await tool("execute_luau", {
         datamodel_type: "Edit",
         studio_id: STUDIO_ID,
         code: sourceCode(target, content),
       });
-      const failed = (res.result && res.result.isError) || res.error;
+      const failed = (res && (res.result && res.result.isError)) || res.error;
       if (failed) failures++;
       console.log((failed ? "FAIL " : "ok   ") + target.name + " :: " + textOf(res));
-      await sleep(120);
+      if (!verifyOnly) await sleep(120);
     }
   }
 
